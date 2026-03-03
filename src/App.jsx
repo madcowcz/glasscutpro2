@@ -1,46 +1,98 @@
 import { useState, useRef, useEffect } from "react";
 
-// ─── PACKING ─────────────────────────────────────────────────────────────────
+// ─── SHELF PACKING ───────────────────────────────────────────────────────────
+// Skládá kusy do řad (shelf) zleva doprava, řady shora dolů.
+// Zbytek tabule je vždy jeden čistý obdélník vpravo/dole — použitelný dál.
 function packPieces(sheetW, sheetH, pieces, kerf = 3) {
   const placed = [], unplaced = [];
-  const sheets = [{ w: sheetW, h: sheetH, spaces: [{ x: 0, y: 0, w: sheetW, h: sheetH }] }];
   const expanded = [];
   pieces.forEach((p) => { for (let i = 0; i < p.qty; i++) expanded.push({ ...p }); });
-  expanded.sort((a, b) => b.w * b.h - a.w * a.h);
+  // Seřadit podle výšky sestupně (kusy stejné výšky do stejné řady)
+  expanded.sort((a, b) => b.h - a.h || b.w - a.w);
+
+  // Stav každého listu: pole řad { y, h, usedW }
+  const sheetStates = [{ shelves: [{ y: 0, h: 0, usedW: 0 }] }];
+
+  const tryPlace = (si, piece, rot) => {
+    const pw = rot ? piece.h : piece.w;
+    const ph = rot ? piece.w : piece.h;
+    if (pw > sheetW || ph > sheetH) return null;
+    const state = sheetStates[si];
+    // Zkus přidat do existující řady
+    for (let ri = 0; ri < state.shelves.length; ri++) {
+      const shelf = state.shelves[ri];
+      const x = shelf.usedW > 0 ? shelf.usedW + kerf : 0;
+      const y = shelf.y;
+      // Výška řady: buď 0 (prázdná) nebo pevná
+      const shelfH = shelf.h || ph;
+      if (ph > shelfH) continue; // kus je vyšší než řada
+      if (x + pw > sheetW) continue; // nevejde se šířka
+      // Zkontroluj zda se vejde vertikálně
+      const bottomY = y + shelfH;
+      if (bottomY > sheetH) continue;
+      return { si, ri, x, y, pw, ph, shelfH };
+    }
+    // Zkus otevřít novou řadu pod poslední
+    const lastShelf = state.shelves[state.shelves.length - 1];
+    const newY = lastShelf.y + lastShelf.h + (lastShelf.h > 0 ? kerf : 0);
+    if (newY + ph > sheetH) return null; // nevejde se
+    return { si, ri: state.shelves.length, x: 0, y: newY, pw, ph, shelfH: ph, newShelf: true };
+  };
 
   for (const piece of expanded) {
     if (piece.w > sheetW || piece.h > sheetH) { unplaced.push(piece); continue; }
-    let best = null, bestSi = -1, bestRot = false;
-    const tryFit = (si, sp, rot) => {
-      const pw = rot ? piece.h : piece.w, ph = rot ? piece.w : piece.h;
-      if (pw > sp.w || ph > sp.h) return;
-      const waste = sp.w * sp.h - pw * ph;
-      if (!best || waste < best.waste) { best = { sp, waste, pw, ph }; bestSi = si; bestRot = rot; }
-    };
-    for (let si = 0; si < sheets.length; si++)
-      for (const sp of sheets[si].spaces) { tryFit(si, sp, false); if (piece.w !== piece.h) tryFit(si, sp, true); }
-    if (!best) {
-      sheets.push({ w: sheetW, h: sheetH, spaces: [{ x: 0, y: 0, w: sheetW, h: sheetH }] });
-      bestSi = sheets.length - 1;
-      for (const sp of sheets[bestSi].spaces) { tryFit(bestSi, sp, false); if (piece.w !== piece.h) tryFit(bestSi, sp, true); }
+
+    let best = null;
+    // Zkus všechny listy, bez rotace i s rotací
+    for (let si = 0; si < sheetStates.length; si++) {
+      const r1 = tryPlace(si, piece, false);
+      if (r1) { if (!best || (r1.newShelf ? 1 : 0) < (best.newShelf ? 1 : 0)) best = r1; }
+      if (piece.w !== piece.h) {
+        const r2 = tryPlace(si, piece, true);
+        if (r2) { if (!best || (r2.newShelf ? 1 : 0) < (best.newShelf ? 1 : 0)) best = r2; }
+      }
     }
-    const { sp, pw, ph } = best;
-    placed.push({ sheetIndex: bestSi, x: sp.x, y: sp.y, w: pw, h: ph, rotated: bestRot, id: piece.id, label: piece.label, origW: piece.w, origH: piece.h });
-    const sheet = sheets[bestSi];
-    sheet.spaces = sheet.spaces.filter((s) => s !== sp);
-    const rw = sp.w - pw - kerf, rh = sp.h - ph - kerf;
-    if (rw > 0) sheet.spaces.push({ x: sp.x + pw + kerf, y: sp.y, w: rw, h: sp.h });
-    if (rh > 0) sheet.spaces.push({ x: sp.x, y: sp.y + ph + kerf, w: pw, h: sp.h - ph - kerf });
+
+    if (!best) {
+      // Nový list
+      sheetStates.push({ shelves: [{ y: 0, h: 0, usedW: 0 }] });
+      const si = sheetStates.length - 1;
+      const r1 = tryPlace(si, piece, false);
+      const r2 = piece.w !== piece.h ? tryPlace(si, piece, true) : null;
+      best = r1 || r2;
+    }
+
+    if (!best) { unplaced.push(piece); continue; }
+
+    const { si, ri, x, y, pw, ph, shelfH, newShelf } = best;
+    const state = sheetStates[si];
+
+    if (newShelf) {
+      state.shelves.push({ y, h: ph, usedW: pw });
+    } else {
+      const shelf = state.shelves[ri];
+      if (shelf.h === 0) shelf.h = ph;
+      shelf.usedW = x + pw;
+    }
+
+    placed.push({
+      sheetIndex: si, x, y, w: pw, h: ph,
+      rotated: pw !== piece.w,
+      id: piece.id, label: piece.label,
+      origW: piece.w, origH: piece.h
+    });
   }
-  const cutsPerSheet = Array.from({ length: sheets.length }, () => 0);
-  const cutLengthPerSheet = Array.from({ length: sheets.length }, () => 0);
-  for (let si = 0; si < sheets.length; si++) {
+
+  const sheetCount = sheetStates.length;
+  const cutsPerSheet = Array.from({ length: sheetCount }, () => 0);
+  const cutLengthPerSheet = Array.from({ length: sheetCount }, () => 0);
+  for (let si = 0; si < sheetCount; si++) {
     placed.filter(p => p.sheetIndex === si).forEach(p => {
       cutsPerSheet[si] += 2;
       cutLengthPerSheet[si] += p.w + p.h;
     });
   }
-  return { placed, unplaced, sheetCount: sheets.length, cutsPerSheet, cutLengthPerSheet };
+  return { placed, unplaced, sheetCount, cutsPerSheet, cutLengthPerSheet };
 }
 
 const COLORS = ["#4F86C6","#E8834D","#5BB98B","#C05F8A","#7B6CD4","#C4A73A","#4AABB8","#D45F5F","#82B84A","#8F7EC4","#D48B4A","#5A9EC9","#C96B6B","#6BC996","#C96BAD"];
